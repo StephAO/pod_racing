@@ -180,7 +180,7 @@ class Pod:
         self.end(simulation=simulation)
 
     def evaluate_pos(self):
-        return self.cp_passed*1e10 - self.dist_to_cp()*0.2 #+ 1e20 * (self.lap == self.req_laps)
+        return self.cp_passed*1e10 - self.dist_to_cp() #+ 1e20 * (self.lap == self.req_laps)
 
     def get_target(self, angle):
         target_angle = (self.angle + angle) % TWO_PI
@@ -200,7 +200,7 @@ class Pod:
 
 
 class Evolution:
-    def __init__(self, pods, pop_size=3, num_turns=5):
+    def __init__(self, pods, pop_size=4, num_turns=4):
         self.pods = pods
         self.start_state = None
         self.pop = None
@@ -221,43 +221,49 @@ class Evolution:
         R = np.argmax(scores[:2])
         print >> sys.stderr, scores, " - ", R
         B = int(not R)
-        B_diff_angles = self.pods.diffAngle(self.pods.xy[np.argmax(scores[2:] + 2)])
+        B_diff_angles = self.pods.diffAngle(self.pods.next_cp[np.argmax(scores[2:] + 2)])
         B_max_num_turns = (np.abs(B_diff_angles) / 0.314159).astype(int)
         # CHILD 1 RUNNER ANGLES
         R_diff_angles = self.pods.diffAngle(self.pods.next_cp[R])
         R_max_num_turns = (np.abs(R_diff_angles) / 0.314159).astype(int)
         R_turning_angle = R_diff_angles / (R_max_num_turns + 1)
         pop[R, 1, :R_max_num_turns[R] + 1, 0] = R_turning_angle[R]
-        pop[B, 1, :B_max_num_turns[B] + 1, 0] = 0.
+        pop[B, 1, :B_max_num_turns[B] + 1, 0] = (B_diff_angles / (B_max_num_turns + 1))[B]
         # CHILD 2 RUNNER ANGLES
         R_diff_angles = self.pods.diffAngle(self.pods.checkpoints[(self.pods.cp_id + 1) % self.pods.num_cp])
         R_max_num_turns = (np.abs(R_diff_angles) / 0.314159).astype(int)
         R_turning_angle = R_diff_angles / (R_max_num_turns + 1)
         pop[R, 2, :R_max_num_turns[R] + 1, 0] = R_turning_angle[0]
-        pop[B, 2, :B_max_num_turns[B] + 1, 0] = 0.
+        pop[B, 2, :B_max_num_turns[B] + 1, 0] = (B_diff_angles / (B_max_num_turns + 1))[B]
         # pop[:,2,:,0] = 0.
-        # pop[:,3:,:,0] = np.random.rand(2, self.pop_size-3, self.num_turns) * 0.628319 - 0.314159
+        pop[:,3:,:,0] = np.random.rand(2, self.pop_size-3, self.num_turns) * 0.628319 - 0.314159
         # pop[:,4:,:,0] = np.random.rand(2, self.pop_size-4, self.num_turns) * 0.628319 - 0.314159
         pop[:,:,:,1] = np.random.randint(50, 101, (2, self.pop_size, self.num_turns))
         return pop
 
-    def breed(self, scores, num_children, num_parents):
+    def breed(self, scores):
         # Select parents based on the distribution of their score
-        parents = self.pop[:, np.random.choice(range(self.pop_size), size=(num_parents), replace=True, p=(scores/np.sum(scores)))]
+        runner_genes = np.argmax(scores[:, 0])
+        bruiser_genes = np.argmax(scores[:, 1])
+        R = int(scores[runner_genes, 2])
+        B = int(scores[bruiser_genes, 3])
 
-        # Create children by randomly selecting attributes from parents
-        children = np.zeros([2, num_children, self.num_turns, 2])
-        children[0,:,:,0] = parents[0, np.random.randint(num_parents, size=(num_children, self.num_turns)), range(self.num_turns), 0]
-        children[0,:,:,1] = parents[0, np.random.randint(num_parents, size=(num_children, self.num_turns)), range(self.num_turns), 1]
-        children[1,:,:,0] = parents[1, np.random.randint(num_parents, size=(num_children, self.num_turns)), range(self.num_turns), 0]
-        children[1,:,:,1] = parents[1, np.random.randint(num_parents, size=(num_children, self.num_turns)), range(self.num_turns), 1]
+        # print >> sys.stderr, R, B, runner_genes, bruiser_genes, scores.shape
+        child = np.zeros([2, 1, self.num_turns, 2])
+        child[R, 0, :, :] = self.pop[R, runner_genes, :, :]
+        child[B, 0, :, :] = self.pop[B, bruiser_genes, :, :]
 
-        return children
+        return child
 
     def mutate(self, base, amplitude):
         # Randomly increase or decrease amplitude
-        base[:,:,:,0] += np.random.choice([1,-1]) * amplitude * 0.628319 #np.random.rand(2, self.pop_size, self.num_turns) 
-        base[:,:,:,1] += np.random.choice([1,-1]) * amplitude * 100. #np.random.rand(2, self.pop_size, self.num_turns)
+        turn_choices = range(self.num_turns) + [range(self.num_turns)] + [[0,1], [2,3]]
+        for i in xrange(self.pop_size):
+            turns_to_update = turn_choices[np.random.randint(0, len(turn_choices))]
+            P = np.random.choice([0, 1])
+            base[P, i, turns_to_update, 0] = np.random.choice([1,-1]) * amplitude * 0.628319
+            base[P, i, turns_to_update, 1] = np.random.choice([1,-1]) * amplitude * 100
+        
         base[:,:,:,0] = np.clip(base[:,:,:,0], -0.314159, 0.314159)
         base[:,:,:,1] = np.clip(base[:,:,:,1], 0, 100)
 
@@ -268,15 +274,15 @@ class Evolution:
         my_bruiser = int(not my_runner)
         # enemy_bruiser = int(not enemy_runner) + 2
         # enemy_runner += 2
-        runner_score = (scores[my_runner] - scores[enemy_runner])
-        bruiser_score = -(sum((pods.xy[my_bruiser] - pods.next_cp[enemy_runner])**2) + sum((pods.xy[my_bruiser] - pods.xy[enemy_runner])**2))
+        runner_score = scores[my_runner]
+        bruiser_score = (-1) * (scores[enemy_runner] + sum((pods.xy[my_bruiser] - pods.next_cp[enemy_runner])**2) + sum((pods.xy[my_bruiser] - pods.xy[enemy_runner])**2))
         # final_score -= pods.self_hit * 3e8
         # pods.self_hit = 0
         # final_score +=  pods.sd[my_runner][enemy_bruiser]
         # my_runner = np.argmax(my_scores)
         # enemy_runner = np.argmax(enemy_scores)
 
-        return runner_score, bruiser_score
+        return runner_score, bruiser_score, my_runner, my_bruiser
 
     def simulate(self, my_sim, moves, extra=False):
         pods = copy.deepcopy(self.pods)
@@ -310,7 +316,7 @@ class Evolution:
         self.pop = self.generate_population()
         self.pop[:, 0] = prev_best
 
-        split_scores = [self.simulate(my_sim, self.move_order(my_sim, self.pop[:,i,:,:], other_pod_moves)) for i in range(self.pop_size)]
+        split_scores = np.array([self.simulate(my_sim, self.move_order(my_sim, self.pop[:,i,:,:], other_pod_moves)) for i in range(self.pop_size)])
         scores = np.array(map(lambda x: x[0] + x[1], split_scores))
 
         min_score = np.min(scores)
@@ -324,7 +330,7 @@ class Evolution:
 
             # Replace worse performing pod_movess with children
             worst_two_ind = np.argpartition(scores, num_children)[:num_children]
-            self.pop[:, worst_two_ind] = self.breed(scores, num_children=num_children, num_parents=num_parents)
+            self.pop[:, worst_two_ind] = self.breed(split_scores)
             
 
             # Elitism - keep best current gen for next gen
@@ -332,9 +338,9 @@ class Evolution:
             elite, elite_score = copy.deepcopy(self.pop[:, best_pod]), scores[best_pod] + prev_min_score - 1
 
             # Mutate pod_moves
-            self.mutate(self.pop, amplitude = min(max(0.2, (20-gen)/10.), 1.0))
+            self.mutate(self.pop, amplitude = min(max(0.1, (20-gen)/10.), 1.0))
 
-            split_scores = [self.simulate(my_sim, self.move_order(my_sim, self.pop[:,i,:,:], other_pod_moves)) for i in range(self.pop_size)]
+            split_scores = np.array([self.simulate(my_sim, self.move_order(my_sim, self.pop[:,i,:,:], other_pod_moves)) for i in range(self.pop_size)])
             scores = np.array(map(lambda x: x[0] + x[1], split_scores))
 
             worst_pod = np.argmin(scores)
@@ -355,7 +361,7 @@ class Evolution:
         enemy_best, _a, _x = self.evolve(False, 20, self.enemy_prev_best, self.my_prev_best, num_children, num_parents)
         self.enemy_prev_best = np.concatenate((enemy_best[:, 1:], enemy_best[:, -1:]), axis=1)
 
-        my_best, _b, _y = self.evolve(True, 105, self.my_prev_best, enemy_best, num_children, num_parents)
+        my_best, _b, _y = self.evolve(True, 100, self.my_prev_best, enemy_best, num_children, num_parents)
         self.my_prev_best = np.concatenate((my_best[:, 1:], my_best[:, -1:]), axis=1)
 
         angle = my_best[:, 0, 0]
